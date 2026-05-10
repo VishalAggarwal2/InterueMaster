@@ -1,0 +1,35 @@
+#!/bin/sh
+# Maven wrapper script
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.
+
+set -e
+
+# OS specific support.
+cygwin=false;
+darwin=false;
+mingw=false
+case "$(uname)" in
+  CYGWIN*) cygwin=true ;;
+  MINGW*) mingw=true ;;
+  Darwin*) darwin=true ;;
+esac
+
+if [ -z "$JAVA_HOME" ] ; then
+  if [ -r /etc/gentoo-release ] ; then
+    JAVA_HOME=$(java -XshowSettings:vm -version 2>&1 | awk '/java.home/{print $3}')
+  fi
+fi
+
+MAVEN_WRAPPER_JAR=".mvn/wrapper/maven-wrapper.jar"
+MAVEN_WRAPPER_PROPERTIES=".mvn/wrapper/maven-wrapper.properties"
+
+if [ -r "$MAVEN_WRAPPER_PROPERTIES" ]; then
+  . "$MAVEN_WRAPPER_PROPERTIES"
+fi
+
+WRAPPER_LAUNCHER=org.apache.maven.wrapper.MavenWrapperMain
+
+exec java \
+  -cp ".mvn/wrapper/maven-wrapper.jar" \
+  "$WRAPPER_LAUNCHER" "$@"

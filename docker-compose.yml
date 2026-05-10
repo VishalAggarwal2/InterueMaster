@@ -1,0 +1,209 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  IntervAI — Full Local Stack
+#  Run: docker compose up --build
+#  Tear down: docker compose down -v
+# ─────────────────────────────────────────────────────────────────────────────
+
+networks:
+  intervai-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  localstack_data:
+
+# ─── Shared health-check defaults ────────────────────────────────────────────
+x-healthcheck-defaults: &hc-defaults
+  interval: 10s
+  timeout: 5s
+  retries: 5
+  start_period: 30s
+
+services:
+
+  # ─── PostgreSQL ─────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: intervai-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: intervai
+      POSTGRES_USER: intervai
+      POSTGRES_PASSWORD: intervai_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/00_init.sql:ro
+    ports:
+      - "5432:5432"
+    networks:
+      - intervai-net
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD-SHELL", "pg_isready -U intervai -d intervai"]
+
+  # ─── Redis ──────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: intervai-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ""
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - intervai-net
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "redis-cli", "ping"]
+
+  # ─── LocalStack (AWS S3 emulation) ──────────────────────────────────────────
+  localstack:
+    image: localstack/localstack:3.4
+    container_name: intervai-localstack
+    restart: unless-stopped
+    environment:
+      SERVICES: s3,cloudfront
+      DEFAULT_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      HOSTNAME_EXTERNAL: localstack
+      LOCALSTACK_AUTH_TOKEN: ""
+      DEBUG: 0
+    volumes:
+      - localstack_data:/var/lib/localstack
+      - ./infra/localstack/init-aws.sh:/etc/localstack/init/ready.d/init-aws.sh:ro
+    ports:
+      - "4566:4566"
+    networks:
+      - intervai-net
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+
+  # ─── Mailpit (lightweight SMTP dev server — catches all outgoing emails) ─────
+  mailhog:
+    image: axllent/mailpit:latest
+    container_name: intervai-mailhog
+    restart: unless-stopped
+    ports:
+      - "1025:1025"   # SMTP
+      - "8025:8025"   # Web UI → http://localhost:8025
+    networks:
+      - intervai-net
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8025"]
+
+  # ─── Spring Boot Backend ────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: intervai-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    environment:
+      # Database
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: intervai
+      DB_USERNAME: intervai
+      DB_PASSWORD: intervai_password
+
+      # Redis
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ""
+
+      # JWT (change in production!)
+      JWT_SECRET: local_dev_secret_key_change_in_prod_1234567890abcdef
+
+      # Anthropic Claude (required — add your real key)
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-sk-ant-REPLACE_ME}
+
+      # ElevenLabs (optional)
+      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
+      ELEVENLABS_VOICE_ID: ${ELEVENLABS_VOICE_ID:-21m00Tcm4TlvDq8ikWAM}
+
+      # AWS → LocalStack
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_S3_BUCKET_NAME: intervai-recordings
+      AWS_CLOUDFRONT_DOMAIN: ""
+      AWS_ENDPOINT_OVERRIDE: http://localstack:4566
+
+      # Mail → MailHog
+      MAIL_HOST: mailhog
+      MAIL_PORT: 1025
+      MAIL_USERNAME: ""
+      MAIL_PASSWORD: ""
+
+      # CORS
+      CORS_ALLOWED_ORIGINS: http://localhost:3000
+
+      # Stripe (optional for local dev)
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+
+      # App
+      SPRING_PROFILES_ACTIVE: local
+    ports:
+      - "8080:8080"
+    networks:
+      - intervai-net
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/api/actuator/health"]
+
+  # ─── Next.js Frontend ───────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8080/api
+        NEXT_PUBLIC_WS_URL: ws://localhost:8080/api/ws
+        NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY: ${NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY:-}
+    container_name: intervai-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8080/api
+      NEXT_PUBLIC_WS_URL: ws://localhost:8080/api/ws
+    ports:
+      - "3000:3000"
+    networks:
+      - intervai-net
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000"]
+
+  # ─── pgAdmin (optional DB GUI) ──────────────────────────────────────────────
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: intervai-pgadmin
+    restart: unless-stopped
+    profiles:
+      - tools
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@intervai.local
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+    ports:
+      - "5050:80"
+    networks:
+      - intervai-net
+    depends_on:
+      - postgres
